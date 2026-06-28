@@ -12,6 +12,7 @@ Served over HTTP so it can be deployed (e.g. FastMCP Cloud).
 """
 
 import os
+import re
 import sqlite3
 
 from fastmcp import FastMCP
@@ -243,6 +244,126 @@ def headcount_by_department() -> list[dict]:
         "SELECT department, COUNT(*) AS headcount FROM employees "
         "GROUP BY department ORDER BY headcount DESC"
     )
+
+
+# ---------------------------------------------------------------------------
+# Write / manipulate tools (admin actions)
+# ---------------------------------------------------------------------------
+def _write(sql: str, params: tuple) -> int:
+    """Execute an INSERT/UPDATE/DELETE; return affected row count (or lastrowid)."""
+    with _connect() as conn:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount
+
+
+@mcp.tool()
+def update_salary(id: int, salary: float | None) -> dict:
+    """Set an employee's salary by id. Pass null to mark them an intern."""
+    n = _write("UPDATE employees SET salary = ? WHERE id = ?", (salary, id))
+    return {"status": "updated" if n else "not_found", "id": id, "salary": salary}
+
+
+@mcp.tool()
+def update_department(id: int, department: str) -> dict:
+    """Move an employee to a different department."""
+    n = _write("UPDATE employees SET department = ? WHERE id = ?", (department, id))
+    return {"status": "updated" if n else "not_found", "id": id, "department": department}
+
+
+@mcp.tool()
+def update_name(id: int, name: str) -> dict:
+    """Rename an employee by id."""
+    n = _write("UPDATE employees SET name = ? WHERE id = ?", (name, id))
+    return {"status": "updated" if n else "not_found", "id": id, "name": name}
+
+
+@mcp.tool()
+def give_raise(id: int, amount: float) -> dict:
+    """Increase an employee's salary by `amount` (interns with NULL salary are skipped)."""
+    n = _write(
+        "UPDATE employees SET salary = salary + ? WHERE id = ? AND salary IS NOT NULL",
+        (amount, id),
+    )
+    if n == 0:
+        return {"status": "no_change", "id": id,
+                "message": "Employee not found, or is an intern with no salary."}
+    row = _q("SELECT name, salary FROM employees WHERE id = ?", (id,))[0]
+    return {"status": "updated", "id": id, "name": row["name"], "new_salary": row["salary"]}
+
+
+@mcp.tool()
+def delete_employee(id: int) -> dict:
+    """Delete an employee by id."""
+    n = _write("DELETE FROM employees WHERE id = ?", (id,))
+    return {"status": "deleted" if n else "not_found", "id": id}
+
+
+# ---------------------------------------------------------------------------
+# Generic "text-to-SQL" tools (the flexible, screenshot-style approach)
+# ---------------------------------------------------------------------------
+# These let an LLM answer ARBITRARY questions by discovering the schema and
+# writing its own SQL, instead of relying on a pre-built tool per question.
+
+@mcp.tool()
+def list_tables() -> list[str]:
+    """List the tables available in the database."""
+    rows = _q(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    )
+    return [r["name"] for r in rows]
+
+
+@mcp.tool()
+def describe_table(table: str = "employees") -> dict:
+    """Return a table's columns (name, type, nullable) so SQL can be written."""
+    valid = [r["name"] for r in _q("SELECT name FROM sqlite_master WHERE type='table'")]
+    if table not in valid:
+        raise ValueError(f"Unknown table '{table}'. Available: {valid}")
+    cols = _q(f"PRAGMA table_info({table})")  # safe: table validated above
+    return {
+        "table": table,
+        "columns": [
+            {"name": c["name"], "type": c["type"], "nullable": not c["notnull"]}
+            for c in cols
+        ],
+    }
+
+
+_FORBIDDEN = (
+    "insert", "update", "delete", "drop", "alter", "create",
+    "replace", "attach", "detach", "pragma", "vacuum",
+)
+
+
+@mcp.tool()
+def run_query(sql: str) -> list[dict]:
+    """Run a READ-ONLY SQL SELECT and return the rows.
+
+    Use this for any question the specific tools don't cover (custom GROUP BY,
+    filters, CASE expressions, etc.). The LLM writes the SQL; this tool just
+    executes it safely. Only a single SELECT/WITH statement is allowed — any
+    write or DDL is rejected, and the database is opened read-only.
+    """
+    cleaned = sql.strip().rstrip(";").strip()
+    lowered = cleaned.lower()
+
+    if ";" in cleaned:
+        raise ValueError("Only a single statement is allowed (no semicolons).")
+    if not (lowered.startswith("select") or lowered.startswith("with")):
+        raise ValueError("Only SELECT/WITH (read-only) queries are allowed.")
+    for kw in _FORBIDDEN:
+        if re.search(rf"\b{kw}\b", lowered):
+            raise ValueError(f"'{kw}' statements are not allowed (read-only).")
+
+    # Open the database in read-only mode for an extra layer of safety.
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(cleaned).fetchall()]
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
