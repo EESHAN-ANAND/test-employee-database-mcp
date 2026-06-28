@@ -1,0 +1,9 @@
+[project]
+name = "test-emp-database-mcp"
+version = "0.1.0"
+description = "Employee analytics MCP server (HTTP) with direct SQL query tools"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "mcp[cli]>=1.28.1",
+]
