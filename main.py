@@ -337,6 +337,7 @@ _FORBIDDEN = (
 )
 
 
+
 @mcp.tool()
 def run_query(sql: str) -> list[dict]:
     """Run a READ-ONLY SQL SELECT and return the rows.
